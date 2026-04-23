@@ -1,63 +1,86 @@
-import City from "../models/City.js";
-import District from "../models/District.js";
-import Neighborhood from "../models/Neighborhood.js";
-import fetch from "node-fetch";
+import axios from "axios";
 
-export const getCities = async (req, res) => {
+const turkeyApi = axios.create({
+  baseURL: "https://api.turkiyeapi.dev/v1",
+});
+
+const fetchTurkeyData = async (endpoint, params, res, errorMsg) => {
   try {
-    const cities = await City.find({});
-    res.json(cities);
+    const { data } = await turkeyApi.get(endpoint, { params });
+    return res.json(data.data || data);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "DB hatası" });
+    console.error(`${errorMsg}:`, err.response?.data || err.message);
+    return res.status(500).json({ error: `External API error: ${errorMsg}` });
   }
 };
 
-export const getDistricts = async (req, res) => {
+export const getCities = (req, res) =>
+  fetchTurkeyData(
+    "/provinces",
+    { fields: "name,id" },
+    res,
+    "Failed to fetch cities",
+  );
+
+export const getDistricts = (req, res) => {
   const { provinceId } = req.query;
-  if (!provinceId) return res.status(400).json({ error: "provinceId gerekli" });
+  if (!provinceId)
+    return res.status(400).json({ error: "provinceId is required" });
 
-  try {
-    const districts = await District.find({ provinceId: parseInt(provinceId) });
-    res.json(districts);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "DB hatası" });
-  }
+  return fetchTurkeyData(
+    "/districts",
+    { provinceId, fields: "id,name" },
+    res,
+    "Failed to fetch districts",
+  );
 };
 
-export const getNeighborhoods = async (req, res) => {
+export const getNeighborhoods = (req, res) => {
   const { districtId } = req.query;
-  if (!districtId) return res.status(400).json({ error: "districtId gerekli" });
+  if (!districtId)
+    return res.status(400).json({ error: "districtId is required" });
 
-  try {
-    const neighborhoods = await Neighborhood.find({ districtId: parseInt(districtId) });
-    res.json(neighborhoods);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "DB hatası" });
-  }
+  return fetchTurkeyData(
+    "/neighborhoods",
+    { districtId, fields: "name,id" },
+    res,
+    "Failed to fetch neighborhoods",
+  );
 };
 
 export const getCoordinates = async (req, res) => {
   const { city, district, neighborhood } = req.query;
+
   if (!city || !district || !neighborhood) {
-    return res.status(400).json({ error: "city, district ve neighborhood gerekli" });
+    return res
+      .status(400)
+      .json({
+        error:
+          "Missing parameters: city, district, and neighborhood are required",
+      });
   }
 
-  const query = encodeURIComponent(`${neighborhood}, ${district}, ${city}, Turkey`);
-  const url = `https://nominatim.openstreetmap.org/search?q=${query}&format=json&limit=1`;
-
   try {
-    const response = await fetch(url, {
-      headers: { "User-Agent": "PeticimApp (info@peticimapp.com)" }
-    });
-    const data = await response.json();
-    if (!data[0]) return res.status(404).json({ error: "Konum bulunamadı" });
+    const { data } = await axios.get(
+      "https://nominatim.openstreetmap.org/search",
+      {
+        params: {
+          q: `${neighborhood}, ${district}, ${city}, Turkey`,
+          format: "json",
+          limit: 1,
+        },
+        headers: { "User-Agent": "PeticimApp (info@peticimapp.com)" },
+      },
+    );
+
+    if (!data?.length)
+      return res.status(404).json({ error: "Location not found" });
 
     res.json({ latitude: data[0].lat, longitude: data[0].lon });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "Konum sorgusu hatası" });
+    console.error("Geocoding error:", err.message);
+    res
+      .status(500)
+      .json({ error: "Location service error: Failed to fetch coordinates" });
   }
 };

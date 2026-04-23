@@ -4,16 +4,12 @@ import express from "express";
 import * as dotenv from "dotenv";
 dotenv.config();
 
+// Firebase initialization (if needed for other services)
 import "./config/firebase.js";
-
-// DB
-import { connectDB } from "./config/mongodb.js";
-await connectDB();
 
 // ROUTES
 import imageRoutes from "./routes/imageRoutes.js";
 import locationRoutes from "./routes/locationRoutes.js";
-import listingRoutes from './routes/listingRoutes.js'
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,13 +17,16 @@ const PORT = process.env.PORT || 3000;
 // MIDDLEWARES
 app.use(express.json());
 
+// HEALTH CHECK
 app.get("/", (req, res) => {
   res.status(200).send("Hello API is working!");
 });
+
+// ROUTE MIDDLEWARES
 app.use("/api/image", imageRoutes);
 app.use("/api/location", locationRoutes);
-app.use("/api/listing", listingRoutes);
 
+// SERVER LISTENER
 if (process.env.NODE_ENV !== "production") {
   app.listen(PORT, () => {
     console.log(`Server is working on http://localhost:${PORT}`);
