@@ -1,134 +1,115 @@
 import admin from "../config/firebase.js";
 import cloudinary from "../config/cloudinary.js";
-import axios from "axios";
-import FormData from "form-data";
 import {
   validateFiles,
   uploadToCloudinary,
   deleteCloudinaryFolder,
-  updateFirestoreArrayField,
+  destroyUploaded,
+  MAX_LISTING_IMAGES,
 } from "../utils/imageHelpers.js";
-import { verifyToken } from "../utils/functions.js";
+import { HttpError } from "../utils/functions.js";
+import { getOwnedListing } from "../utils/listingAccess.js";
+import { db, usersCol, FieldValue } from "../utils/db.js";
 
-const uploadProfileImage = async (file, userId) => {
-  const result = await uploadToCloudinary(file, `profile_images/${userId}`);
-  const userDoc = await admin.firestore().collection("Users").doc(userId).get();
-  const prevProfile = userDoc.data()?.profilePicture;
-  if (prevProfile?.publicId) {
-    try {
-      await cloudinary.uploader.destroy(prevProfile.publicId);
-    } catch {}
+const limitError = () =>
+  new HttpError(400, `Her ilan için maksimum ${MAX_LISTING_IMAGES} fotoğraf yüklenebilir.`);
+
+const uploadProfileImage = async (file, uid) => {
+  const result = await uploadToCloudinary(file, `profile_images/${uid}`);
+  const userRef = usersCol().doc(uid);
+  try {
+    const prevPublicId = (await userRef.get()).data()?.profilePicture?.publicId;
+    await userRef.update({ profilePicture: { ...result, uploadedAt: new Date() } });
+    await admin.auth().updateUser(uid, { photoURL: result.url });
+    // Eski görsel yalnızca yenisi kaydedildikten sonra silinir; profil silinmiş bir görsele bakmasın.
+    if (prevPublicId && prevPublicId !== result.publicId) {
+      try {
+        await cloudinary.uploader.destroy(prevPublicId);
+      } catch (err) {
+        console.warn("Eski profil görseli silinemedi:", err.message);
+      }
+    }
+  } catch (err) {
+    await destroyUploaded([result]);
+    throw err;
   }
-  await admin
-    .firestore()
-    .collection("Users")
-    .doc(userId)
-    .update({
-      profilePicture: { ...result, uploadedAt: new Date() },
-    });
-  await admin.auth().updateUser(userId, { photoURL: result.url });
   return result;
 };
 
-const uploadListingImages = async (files, listingId, folder) => {
-  const listingRef = admin.firestore().collection("Listings").doc(listingId);
-  const uploadedImages = [];
+const uploadListingImages = async (files, listingId, uid) => {
+  const { ref, data } = await getOwnedListing(listingId, uid);
+  const existing = Array.isArray(data.images) ? data.images.length : 0;
+  // Ucuz ön kontrol: gereksiz Cloudinary yüklemesi yapılmasın.
+  if (existing + files.length > MAX_LISTING_IMAGES) throw limitError();
 
-  for (const file of files) {
-    const result = await uploadToCloudinary(file, folder);
-    uploadedImages.push({ ...result, uploadedAt: new Date() });
+  const folder = `Listings/${uid}/${listingId}`;
+  const uploaded = [];
+  try {
+    for (const file of files) {
+      const result = await uploadToCloudinary(file, folder);
+      uploaded.push({ ...result, uploadedAt: new Date() });
+    }
+    // Eşzamanlı isteklere karşı sınır, yazma anında transaction içinde yeniden doğrulanır.
+    await db().runTransaction(async (tx) => {
+      const current = (await tx.get(ref)).data()?.images;
+      if ((Array.isArray(current) ? current.length : 0) + uploaded.length > MAX_LISTING_IMAGES) {
+        throw limitError();
+      }
+      tx.update(ref, { images: FieldValue.arrayUnion(...uploaded) });
+    });
+  } catch (err) {
+    await destroyUploaded(uploaded);
+    throw err;
   }
-
-  await updateFirestoreArrayField(listingRef, "images", uploadedImages);
-  return uploadedImages;
+  return uploaded;
 };
 
-export const uploadImages = async (req, res) => {
+export const uploadImages = async (req, res, next) => {
   try {
-    await verifyToken(req.headers.authorization);
-    const { userId, folder, listingId } = req.body;
-
-    if (!userId || !folder)
-      return res
-        .status(400)
-        .json({ success: false, error: "userId and folder are required" });
-
+    const uid = req.uid;
+    const { folder, listingId } = req.body;
     const files = req.files;
-    if (!files || files.length === 0)
-      return res
-        .status(400)
-        .json({ success: false, error: "No files uploaded" });
+
+    if (typeof folder !== "string" || !folder)
+      throw new HttpError(400, "folder gerekli");
+    if (!files || files.length === 0) throw new HttpError(400, "Dosya yüklenmedi");
+
+    // Klasör istemciden gelse de yalnızca bilinen türlere izin verilir; yol uid'den sunucuda üretilir.
+    const isListingFolder = folder.startsWith("Listings/");
+    if (!["profile_images", "report_images"].includes(folder) && !isListingFolder)
+      throw new HttpError(400, "Geçersiz klasör");
 
     const validationError = validateFiles(files, folder);
-    if (validationError)
-      return res.status(400).json({ success: false, error: validationError });
+    if (validationError) throw new HttpError(400, validationError);
 
-    let uploadedImages = [];
+    let uploadedImages;
     if (folder === "profile_images") {
-      uploadedImages.push(await uploadProfileImage(files[0], userId));
+      uploadedImages = [await uploadProfileImage(files[0], uid)];
+    } else if (folder === "report_images") {
+      // Rapor görseli ilana eklenmez; yalnızca yüklenip adresi döndürülür.
+      const result = await uploadToCloudinary(files[0], `report_images/${uid}`);
+      uploadedImages = [{ ...result, uploadedAt: new Date() }];
     } else {
-      if (!listingId)
-        return res.status(400).json({
-          success: false,
-          error: "listingId is required for this folder",
-        });
-      uploadedImages = await uploadListingImages(files, listingId, folder);
+      uploadedImages = await uploadListingImages(files, listingId, uid);
     }
 
-    res.json({
-      success: true,
-      message: "Images uploaded successfully",
-      uploadedImages,
-    });
+    res.json({ success: true, message: "Images uploaded successfully", uploadedImages });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message || err });
+    next(err);
   }
 };
 
-export const deleteImages = async (req, res) => {
+export const deleteImages = async (req, res, next) => {
   try {
-    await verifyToken(req.headers.authorization);
-    const { userId, listingId } = req.body;
-    if (!userId || !listingId)
-      return res
-        .status(400)
-        .json({ success: false, error: "userId and listingId are required" });
+    const uid = req.uid;
+    const { listingId } = req.body;
+    const { ref } = await getOwnedListing(listingId, uid);
 
-    const listingRef = admin.firestore().collection("Listings").doc(listingId);
-    const listingDoc = await listingRef.get();
-    if (!listingDoc.exists)
-      return res
-        .status(404)
-        .json({ success: false, error: "Listing not found" });
+    await deleteCloudinaryFolder(`Listings/${uid}/${listingId}`);
+    await ref.update({ images: [] });
 
-    await deleteCloudinaryFolder(`Listings/${userId}/${listingId}`);
-    await listingRef.update({ images: [] });
-
-    res.json({
-      success: true,
-      message: `All images and folder for listing '${listingId}' deleted successfully`,
-    });
+    res.json({ success: true, message: "Görseller silindi" });
   } catch (err) {
-    res
-      .status(500)
-      .json({ success: false, error: err.message || "Internal Server Error" });
-  }
-};
-
-export const getImages = async (req, res) => {
-  try {
-    await verifyToken(req.headers.authorization);
-    const { publicIds } = req.body;
-    if (!publicIds || !Array.isArray(publicIds))
-      return res.status(400).json({ success: false, urls: {} });
-
-    const urls = {};
-    publicIds.forEach((id) => {
-      urls[id] = cloudinary.url(id, { type: "private", sign_url: true });
-    });
-
-    res.json({ success: true, urls });
-  } catch (err) {
-    res.status(401).json({ success: false, urls: {} });
+    next(err);
   }
 };

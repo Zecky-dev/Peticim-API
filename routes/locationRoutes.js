@@ -1,11 +1,15 @@
 import express from "express";
-import { getCities, getDistricts, getNeighborhoods, getCoordinates } from "../controllers/locationController.js";
+import { requireAuth } from "../middleware/auth.js";
+import { geocodeLimiter, locationLimiter } from "../middleware/rateLimit.js";
+import { getCities, getDistricts, getNeighborhoods, getCoordinates, reverseGeocode } from "../controllers/locationController.js";
 
 const router = express.Router();
 
-router.get("/cities", getCities);
-router.get("/districts", getDistricts);
-router.get("/neighborhoods", getNeighborhoods);
-router.get("/coordinates", getCoordinates);
+router.use(requireAuth);
+router.get("/cities", locationLimiter, getCities);
+router.get("/districts", locationLimiter, getDistricts);
+router.get("/neighborhoods", locationLimiter, getNeighborhoods);
+router.get("/coordinates", geocodeLimiter, getCoordinates);
+router.get("/reverse", geocodeLimiter, reverseGeocode);
 
 export default router;

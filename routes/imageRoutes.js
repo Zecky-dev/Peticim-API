@@ -1,14 +1,16 @@
 import express from "express";
-import multer from "multer";
+import { requireAuth } from "../middleware/auth.js";
+import { imageWriteLimiter } from "../middleware/rateLimit.js";
+import { createImageUpload } from "../middleware/upload.js";
+import { uploadImages, deleteImages } from "../controllers/imageController.js";
+import { MAX_LISTING_IMAGES } from "../utils/imageHelpers.js";
 
 const router = express.Router();
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
 
-import { uploadImages, getImages, deleteImages } from "../controllers/imageController.js";
+const upload = createImageUpload({ fields: 10, fieldSize: 1024 });
 
-router.post("/upload", upload.array("files"), uploadImages);
-router.post("/delete", deleteImages);
-router.post('/', getImages);
+// Sıra önemli: önce kimlik, sonra limit (kullanıcı başına), en son dosya ayrıştırma
+router.post("/upload", requireAuth, imageWriteLimiter, upload.array("files", MAX_LISTING_IMAGES), uploadImages);
+router.post("/delete", requireAuth, imageWriteLimiter, deleteImages);
 
 export default router;
