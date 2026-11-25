@@ -32,7 +32,7 @@ app.use(express.json({ limit: "10kb" }));
 
 // HEALTH CHECK
 app.get("/", (req, res) => {
-  res.status(200).send("Hello API is working!");
+  res.status(200).json({ service: "peticim-api", status: "ok" });
 });
 
 // ROUTE MIDDLEWARES
